@@ -197,22 +197,23 @@ function reconcile(trainId, cls) {
  * Like reconcile(), but matches ALL waitlisted passengers in a given class
  * onto a specific train — regardless of their original trainId.
  * Used when a new extra train (加班车) is added.
- * Only adds passengers within 1 hour time window of their original train
+ * Only adds passengers within 1 hour time window of their original train's departure.
  */
 function reconcileOntoTrain(trainId, cls) {
   const train = trains.find(t => t.id === trainId);
   if (!train) return [];
 
-  const trainTime = train.times.BJ;
+  const newTrainTime = train.times.BJ;
   let targetHour = 20;
-  if (trainTime && trainTime !== '--:--') {
-    targetHour = parseInt(trainTime.split(':')[0]);
+  if (newTrainTime && newTrainTime !== '--:--') {
+    targetHour = parseInt(newTrainTime.split(':')[0]);
   }
 
   // Only add waitlist passengers whose original train is within 1 hour of new train
   const queue = waitlist.filter(w => {
+    if (w.cls !== cls) return false;
     const origTrain = trains.find(t => t.id === w.trainId);
-    if (!origTrain || !origTrain.times.BJ || origTrain.times.BJ === '--:--') return false;
+    if (!origTrain || !origTrain.times.BJ || origTrain.times.BJ === '--:--') return true; // Include if no time info
     const origHour = parseInt(origTrain.times.BJ.split(':')[0]);
     return Math.abs(origHour - targetHour) <= 1;
   });
@@ -365,6 +366,66 @@ function createExtraTrain() {
   };
 }
 
+function createSmartExtraTrain(targetFrom, targetTo) {
+  trainCounter++;
+  const id = `G${trainCounter}`;
+  
+  // Find the hour with highest waitlist demand for this segment
+  const wlByHour = {};
+  for (const w of waitlist) {
+    if (w.from === targetFrom && w.to === targetTo) {
+      const train = trains.find(t => t.id === w.trainId);
+      if (train && train.times.BJ && train.times.BJ !== '--:--') {
+        const hour = parseInt(train.times.BJ.split(':')[0]);
+        if (!wlByHour[hour]) wlByHour[hour] = 0;
+        wlByHour[hour] += (w.count || 1);
+      }
+    }
+  }
+  
+  // Find hour with max waitlist, default to 20:00 if none
+  let targetHour = 20;
+  let maxWL = 0;
+  for (const [hour, wl] of Object.entries(wlByHour)) {
+    if (wl > maxWL) {
+      maxWL = wl;
+      targetHour = parseInt(hour);
+    }
+  }
+  
+  // Add train within 1 hour of target hour (+1 hour from the target to avoid collision)
+  let newHour = targetHour + 1;
+  if (newHour >= 24) newHour = newHour - 24;
+  const bjTime = `${String(newHour).padStart(2,'0')}:00`;
+  
+  function addMins(hhmm, mins) {
+    if (hhmm === '--:--') return '--:--';
+    const [h, m] = hhmm.split(':').map(Number);
+    let totalMins = h * 60 + m + mins;
+    let newH = Math.floor(totalMins / 60) % 24;
+    let newM = totalMins % 60;
+    return `${String(newH).padStart(2,'0')}:${String(newM).padStart(2,'0')}`;
+  }
+  
+  const times = {
+    BJ: bjTime,
+    JN: addMins(bjTime, 137),
+    NJ: addMins(addMins(bjTime, 137), 88),
+    SH: addMins(addMins(addMins(bjTime, 137), 88), 103)
+  };
+  
+  return {
+    id,
+    type: 'G',
+    times,
+    seats: makeSeats(),
+    active: true,
+    isExtra: true,
+    targetedSegment: `${targetFrom}-${targetTo}`,
+    targetHour: newHour
+  };
+}
+
 /**
  * Pre-populate realistic data for the workshop demo:
  *
@@ -435,6 +496,14 @@ app.get('/api/trains', (req, res) => {
       arrive:   train.times[to],
       duration: calcDuration(from, to, train.times),
       occ:      Math.round(occupancy(train) * 100),
+      // Full route info
+      fullRoute: {
+        BJ: train.times.BJ,
+        JN: train.times.JN,
+        NJ: train.times.NJ,
+        SH: train.times.SH,
+        fullDuration: calcDuration('BJ', 'SH', train.times)
+      },
       seats: Object.fromEntries(
         CLS.map(c => [c, countAvailable(train, c, from, to)])
       ),
@@ -492,20 +561,49 @@ app.post('/api/book', (req, res) => {
   // ── PHYSICAL SEAT CHECK (all-or-nothing) ────────────────────────────────
   const available = countAvailable(train, cls, from, to);
   if (available < count) {
-    // Auto-create extra train if waitlist is too long
-    const totalWL = waitlist.length;
-    const highOccTrains = trains.filter(t => occupancy(t) >= 85).length;
+    // Check segment with highest waitlist demand
+    const wlBySegment = waitlist.reduce((acc, w) => {
+      const route = `${w.from}-${w.to}`;
+      if (!acc[route]) acc[route] = 0;
+      acc[route] += (w.count || 1);
+      return acc;
+    }, {});
     
-    if (totalWL >= 10 || (highOccTrains >= 3 && totalWL >= 5)) {
-      const newTrain = createExtraTrain();
+    const currentRoute = `${from}-${to}`;
+    const currentWL = wlBySegment[currentRoute] || 0;
+    
+    // Only add train for segment with highest demand, and only if demand is significant
+    // Wait for cancellations to cover smaller demand
+    let shouldAddTrain = false;
+    let targetSegment = currentRoute;
+    
+    const totalWL = waitlist.length;
+    if (totalWL >= 10) {
+      // Find segment with max waitlist
+      let maxWL = 0;
+      for (const [seg, wl] of Object.entries(wlBySegment)) {
+        if (wl > maxWL) {
+          maxWL = wl;
+          targetSegment = seg;
+        }
+      }
+      // Only add if this segment has highest demand (at least 2x the next)
+      const otherWL = totalWL - maxWL;
+      shouldAddTrain = maxWL >= otherWL * 2 || maxWL >= 20;
+    }
+    
+    if (shouldAddTrain) {
+      const [targetFrom, targetTo] = targetSegment.split('-');
+      const newTrain = createSmartExtraTrain(targetFrom, targetTo);
       trains.push(newTrain);
       reconcileOntoTrain(newTrain.id, cls);
       
       return res.json({
         status:     'AUTO_ADD',
-        msg:        `No seats available. Extra train ${newTrain.id} added! Please re-book.`,
+        msg:        `High waitlist on ${targetSegment}. Extra train ${newTrain.id} added at ${newTrain.times.BJ}! Please re-book.`,
         newTrainId: newTrain.id,
         newTrainDepart: newTrain.times.BJ,
+        segment: targetSegment,
       });
     }
     

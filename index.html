@@ -307,7 +307,7 @@ let autoTickTimer = null;
 let tickRunning = false;
 let tickCount = 0;
 let tickSpeed = 200;
-let tickRoute = 'BJ-SH';
+let tickRoute = 'BJ-SH'; // FIXED: Auto-tick has its own route variable
 
 const ROUTES = [
   { from:'BJ', to:'SH' },
@@ -340,18 +340,8 @@ function onRouteChange() {
     toSel.value = state.to;
   }
   
-  // Update tick route to match search route
-  const routeKey = `${state.from}-${state.to}`;
-  const routeSelect = document.getElementById('tickRoute');
-  if (['BJ-SH','BJ-NJ','JN-SH','NJ-SH','BJ-JN','JN-NJ'].includes(routeKey)) {
-    routeSelect.value = routeKey;
-    tickRoute = routeKey;
-  } else {
-    routeSelect.value = 'random';
-    tickRoute = 'random';
-  }
-  
-  // Immediately load trains for new route
+  // NOTE: Do NOT change tickRoute here - auto-tick route stays independent
+  // Only load trains for display
   loadTrains();
 }
 
@@ -359,6 +349,7 @@ function swapStations() {
   [state.from, state.to] = [state.to, state.from];
   document.getElementById('fromSel').value = state.from;
   document.getElementById('toSel').value = state.to;
+  // NOTE: Do NOT change tickRoute here
   loadTrains();
 }
 
@@ -388,6 +379,8 @@ function renderTrains() {
   let rows = '';
   for (const t of state.trains) {
     const occLvl = t.occ >= 80 ? 'high' : t.occ >= 60 ? 'mid' : 'low';
+    const route = t.fullRoute || {};
+    
     rows += `
     <div class="train-row">
       <div>
@@ -396,19 +389,19 @@ function renderTrains() {
       </div>
       <div class="time-info">
         <div class="time-station">
-          <span class="time-sta-time">${t.depart}</span>
-          <span class="time-sta-name">${STATIONS[state.from]}</span>
+          <span class="time-sta-time">${route.BJ || t.depart}</span>
+          <span class="time-sta-name">BJ</span>
         </div>
         <div class="time-arrow">
           <div class="time-arrow-line"></div>
-          <span class="time-duration">${t.duration}</span>
+          <span class="time-duration">${route.fullDuration || t.duration}</span>
         </div>
         <div class="time-station">
-          <span class="time-sta-time">${t.arrive}</span>
-          <span class="time-sta-name">${STATIONS[state.to]}</span>
+          <span class="time-sta-time">${route.SH || t.arrive}</span>
+          <span class="time-sta-name">SH</span>
         </div>
       </div>
-      <div class="time-duration" style="text-align:center">${t.duration}</div>
+      <div class="time-duration" style="text-align:center">${route.fullDuration || t.duration}</div>
       <div class="occ-info occ-${occLvl}">
         <span class="occ-pct">${t.occ}%</span>
         <div class="occ-bar"><div class="occ-fill" style="width:${t.occ}%"></div></div>
@@ -543,7 +536,7 @@ function showToast(type, msg) {
 function autoTick() {
   if (!tickRunning) return;
   
-  // Determine route (random or fixed)
+  // FIXED: Use tickRoute independently, not state.from/state.to
   let from, to;
   if (tickRoute === 'random') {
     const route = ROUTES[Math.floor(Math.random() * ROUTES.length)];
@@ -563,7 +556,6 @@ function autoTick() {
     tickCount++;
     
     // Human-like time window selection
-    // People typically want: morning (6-10), midday (10-14), afternoon (14-18), evening (18-22)
     const timeWindows = [
       { name: 'morning', start: 6, end: 10 },
       { name: 'midday', start: 10, end: 14 },
@@ -571,7 +563,6 @@ function autoTick() {
       { name: 'evening', start: 18, end: 22 }
     ];
     const window = timeWindows[Math.floor(Math.random() * timeWindows.length)];
-    const hour = window.start + Math.floor(Math.random() * (window.end - window.start));
     
     // Find trains in the selected time window
     const windowTrains = trains.filter(t => {
@@ -594,19 +585,18 @@ function autoTick() {
     
     const t = validTrains[Math.floor(Math.random() * validTrains.length)];
     
-    // Realistic class ratio: ~70% second class, ~25% first class, ~5% business
+    // Realistic class ratio
     const r = Math.random();
     let cls;
     if (r < 0.70) cls = 'second';
     else if (r < 0.95) cls = 'first';
     else cls = 'business';
     
-    // Only use class if seats available
     if (t.seats[cls] <= 0) {
       cls = t.seats.second > 0 ? 'second' : (t.seats.first > 0 ? 'first' : 'business');
     }
     
-    // Random order size: 1-5 tickets (weighted toward smaller orders)
+    // Random order size
     const countR = Math.random();
     let count;
     if (countR < 0.5) count = 1;
@@ -675,6 +665,7 @@ function updateTickSpeed() {
 }
 
 function updateTickRoute() {
+  // FIXED: Only update tickRoute, don't affect search display
   tickRoute = document.getElementById('tickRoute').value;
 }
 
